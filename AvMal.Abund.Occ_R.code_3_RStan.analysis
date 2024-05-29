@@ -1,0 +1,718 @@
+################
+# (3) Data analysis in R/Stan and visualisation of results
+################
+
+# Load R packages
+library(rstan)
+library(posterior)
+library(tidyverse)
+library(boot)
+library(bayesplot)
+library(tidybayes)
+library(rstanarm)
+library(cmdstanr)
+library(ggh4x)
+library(gridExtra)
+library(vegan)
+
+######
+## Principal component analysis (PCA) of climate variables
+#bio1 = Annual Mean Temperature 
+#bio4 = Temperature Seasonality 
+#bio7 = Temperature Annual Range (bio5-bio6)
+#bio12 = Annual Precipitation
+#bio14 = Precipitation of Driest Month
+#bio15 = Precipitation Seasonality (Coefficient of Variation) 
+
+Var_climate <- scale(D.site.sel[, grep("bio", names(D.site.sel))])
+PCA_climate <- rda(Var_climate)
+scores(PCA_climate)
+biplot(PCA_climate)
+
+D.site.sel$climate_PC1 <- as.numeric(scores(PCA_climate)$sites[,1])
+D.site.sel$climate_PC2 <- as.numeric(scores(PCA_climate)$sites[,2])
+
+scores(PCA_climate)$species
+# PC1: warmer,more constant and less fluctuating temperature, more rain
+# PC2: drier, seasaonal rain
+
+# Data prep: vector with full names of parasite genera
+D.lin_pt.sel <- D.lin_pt.sel %>% mutate(genus = str_replace_all(Genus, c('PA' = 'Parahaemoproteus', 'PL' = 'Plasmodium', 'LE' = 'Leucocytozoon'))) %>%
+					   mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon')))
+
+
+D.lin_pt.sel$climate_PC1 <- D.site.sel$climate_PC1[match(D.lin_pt.sel$pt.id, D.site.sel$pt.id)]
+D.lin_pt.sel$climate_PC2 <- D.site.sel$climate_PC2[match(D.lin_pt.sel$pt.id, D.site.sel$pt.id)]
+
+# Data prep: group realms into four groups only
+D.lin_pt.sel$realm <- ifelse(D.lin_pt.sel$realm=="Saharo-Arabian", "Afrotropical", D.lin_pt.sel$realm)  
+region_name <- sort(unique(D.lin_pt.sel$realm))
+nregion <- length(region_name)
+
+##var_name <- c("B.phyl", "B.func", "mainH.avail", "marginalH.avail", "propHostSp", "SpRich", "climate PC1", "climate PC2")
+## NOTE:    "marginalH.avail" corelates with "propHostSp"
+var_name <- c("B.phyl", "B.func", "Main host avail" , "Host range", "Bird specrich", "Climate-PC1", "Climate-PC2")
+nvar <- length(var_name)
+genus_name <- c('Leucocytozoon', 'Parahaemoproteus', 'Plasmodium')   ##c("LE", "PA", "PL")
+ngenus <-  length(genus_name)
+
+# Combine vectors of sampled host populations into array 
+nsamp_main = D.lin_pt.sel$nsamp_host.main
+nsamp_other = (D.lin_pt.sel$nsamp_all - D.lin_pt.sel$nsamp_host)
+nsamp_marg = (D.lin_pt.sel$nsamp_host - D.lin_pt.sel$nsamp_host.main)
+nsampArr  <- cbind(D.lin_pt.sel$nsamp_host.main, nsamp_marg, nsamp_other)
+
+# Stan data
+stan_data <-list(
+  N = dim(D.lin_pt.sel)[1],
+  K = nvar,
+  G = nlevels(as.factor(D.lin_pt.sel$Genus)),
+  C = 3,
+  genus = as.numeric(as.factor(D.lin_pt.sel$Genus)),
+  nsamp_all = D.lin_pt.sel$nsamp_all,
+  nsamp_hosts = D.lin_pt.sel$nsamp_host,
+  ninf_hosts = D.lin_pt.sel$nsamp_infect,
+  nsamp_main = D.lin_pt.sel$nsamp_host.main,
+  ninf_main = D.lin_pt.sel$nsamp_infect.main,
+  nsamp_marg = (D.lin_pt.sel$nsamp_host - D.lin_pt.sel$nsamp_host.main),
+  ninf_marg = (D.lin_pt.sel$nsamp_infect - D.lin_pt.sel$nsamp_infect.main),
+  nsamp_other = (D.lin_pt.sel$nsamp_all - D.lin_pt.sel$nsamp_host),
+  nspec_host = D.lin_pt.sel$nspec_host,
+  nspec_all = D.lin_pt.sel$nspec_all,
+  nsampArr = nsampArr,
+  sprich = D.lin_pt.sel$Bird.specrich,
+  climate_PC1 = as.numeric(scale(D.lin_pt.sel$climate_PC1)),
+  climate_PC2 = as.numeric(scale(D.lin_pt.sel$climate_PC2)),
+  hrChao_mu = D.lin_pt.sel$HostRange_Chao_mean,
+  hrChao_sd = D.lin_pt.sel$HostRange_Chao_sd,
+  Bphyl_mu = D.lin_pt.sel$B.ind.phyl,
+  Bphyl_sd = ifelse(is.na(D.lin_pt.sel$B.ind.phyl.sd), mean(D.lin_pt.sel$B.ind.phyl.sd, na.rm=T), D.lin_pt.sel$B.ind.phyl.sd),
+  Bfunc_mu = D.lin_pt.sel$B.ind.func,
+  Bfunc_sd = ifelse(is.na(D.lin_pt.sel$B.ind.func.sd), mean(D.lin_pt.sel$B.ind.func.sd, na.rm=T), D.lin_pt.sel$B.ind.func.sd),
+  Bfunc_mu_0 = D.lin_pt.sel$B.ind.func,
+  Bfunc_sd_0 = pmax(ifelse(is.na(D.lin_pt.sel$B.ind.func.sd), 0.001, D.lin_pt.sel$B.ind.func.sd), 0.01),
+  varp_sprich = seq(from = 1, to = max(D.lin_pt.sel$Bird.specrich), by = 5),
+  le_sprich = length(seq(from = 1, to = max(D.lin_pt.sel$Bird.specrich), by = 5)),
+  varp_phost = seq(from = 0, to = 0.8, by = 0.01),
+  le_phost = length(seq(from = 0, to = 0.8, by = 0.01))
+)
+
+
+# Stan model
+model_mv <-
+'data {
+  int<lower=1> N;                           // number of lineages
+  int<lower=1> K;                           // number of covariates
+  int<lower=1> G;                           // number of genera 
+  int<lower=1> C;                           // number of genera 
+  array[N] int<lower=0> genus;              // genus
+  array[N] int<lower=0> nsamp_all;                //number of all individuals (all species) sampled
+  array[N] int<lower=0> nsamp_hosts;                //number of sampled host individuals (all species)
+  array[N] int<lower=0> nsamp_main;                  //number of individuals from main host species
+  array[N] int<lower=0> nsamp_marg;                  //number of all host individuals from marginal host species)
+  array[N] int<lower=0> nsamp_other;                  // number of all non-host individuals          
+  array[N] int<lower=0> ninf_hosts;                   // number of infected host individuals (all species)
+  array[N] int<lower=0> ninf_main;                   //  number of infected host individuals from main host species
+  array[N] int<lower=0> nspec_host;                  // number of recorded host species 
+  array[N] int<lower=0> nspec_all;                   // number of recorded species (all) 
+  array[N,C] int<lower=0> nsampArr;
+  vector[N] Bphyl_mu;                       //mean of estimates for Bfunc  
+  vector<lower=0>[N] Bphyl_sd;              //sd of estimates for BPhyl
+  vector[N] Bfunc_mu;                       //mean of estimates for Bfunc
+  vector<lower=0>[N] Bfunc_sd;              //sd of estimates for Bfunc
+  vector[N] Bfunc_mu_0;                       //mean of estimates for Bfunc
+  vector<lower=0>[N] Bfunc_sd_0;              //sd of estimates for Bfunc
+  vector[N] hrChao_mu;                       //mean of Chao host range  
+  vector<lower=0>[N] hrChao_sd;              //sd of Chao host range 
+  vector<lower=0>[N] sprich;                         //bird species richness at locations
+  vector[N] climate_PC1;
+  vector[N] climate_PC2;
+  int<lower=1> le_sprich;
+  vector[le_sprich] varp_sprich;
+  int<lower=1> le_phost;
+  vector[le_phost] varp_phost;
+}
+parameters {
+  vector[G] mu;
+  matrix<lower=-5, upper=5>[K,G] beta_std;
+  vector<lower=-5, upper=5>[N] Bphyl;
+  vector<lower=-5, upper=5>[N] Bfunc;
+  vector<lower=-5, upper=5>[N] Bfunc_0;
+  vector<lower=1, upper=50>[N] hrChao;
+  vector<lower=0, upper=1>[N] phspec;
+  matrix[K,G] lambda;
+  simplex[C] phost[N];
+  vector[N] alpha_1;
+  vector[N] alpha_2;
+  real<lower=0> phi;
+  real<lower=0> c_slap; 
+  real<lower=0> tau;
+  real<lower=0> sigma_tau; 
+  real<lower=0> sigma_beta;  
+}
+transformed parameters {
+  vector[N] Bphyl_sc;
+  vector[N] Bfunc_sc;
+  vector[N] hrChao_sc;
+  vector[N] phost_main_sc;
+  vector[N] phost_marg_sc;
+  vector[N] phost_main;
+  vector[N] phost_marg;
+  vector[N] phspec_sc;
+  vector[N] sprich_sc; 
+  vector[N] logit_theta;
+  // Scaled covariates
+  Bphyl_sc = (Bphyl - mean(Bphyl))/sd(Bphyl);
+  Bfunc_sc = (Bfunc_0 - mean(Bfunc_0))/sd(Bfunc_0);
+  hrChao_sc = (hrChao_mu - mean(hrChao_mu))/sd(hrChao_mu);
+  phost_main = to_vector(phost[,1]); 
+  phost_marg = to_vector(phost[,2]);
+  phost_main_sc = (phost_main - mean(phost_main))/sd(phost_main);
+  phost_marg_sc = (phost_marg  - mean(phost_marg ))/sd(phost_marg);
+  phspec_sc = (phspec - mean(phspec))/sd(phspec);
+  sprich_sc = (sprich - mean(sprich))/sd(sprich);
+  // lambda_tilde for RHS priors
+  matrix[K,G] lambda_tilde;
+  //array[G] vector<lower=0>[K] lambda_tilde;
+  for (k in 1:K){
+  	for (g in 1:G){
+		lambda_tilde[k,g] = sqrt(c_slap^2 * square(lambda[k,g]) ./ (c_slap^2 + tau^2 * square(lambda[k,g])));
+	}
+  }
+  // Linear predictor
+  for (n in 1:N){
+    logit_theta[n] = mu[genus[n]] 
+                    + beta_std[1, genus[n]] * Bphyl_sc[n]     
+                    + beta_std[2, genus[n]] * Bfunc_sc[n]     
+                    + beta_std[3, genus[n]] * phost_main_sc[n]               
+                    + beta_std[4, genus[n]] * hrChao_sc[n]
+                    + beta_std[5, genus[n]] * sprich_sc[n]     
+                    + beta_std[6, genus[n]] * climate_PC1[n]
+                    + beta_std[7, genus[n]] * climate_PC2[n];
+  }
+}
+model {
+  // Priors
+  mu ~ normal(0, 3);  
+  sigma_beta ~ cauchy(0,1);    
+  // Coefficients estimates
+  for (k in 1:K){
+  	for (g in 1:G){
+		beta_std[k,g] ~ normal(0, tau * lambda_tilde[k,g]); // beta-priors
+	}
+  }
+  // RHS prior
+  sigma_tau ~ gamma(1, 1);
+  tau ~ cauchy(0,1);   //student_t(1,0,sigma_tau); //normal(0, log(1.1));
+  c_slap ~ student_t(3,0,1);
+  for (k in 1:K){
+	  lambda[k] ~ cauchy(0,1);
+  }	
+  phi ~ gamma(0.01, 0.01);
+  alpha_1 ~ normal(0,2);
+  alpha_2 ~ normal(0,2);
+  // initialize linear predictor terms
+  vector[N] mu_1 = rep_vector(0.0, N);
+  vector[N] mu_2 = rep_vector(0.0, N);  
+  // logit-linear predictor matrix
+  vector[C] mu_phost[N];
+  mu_1 += to_vector(alpha_1);
+  mu_2 += to_vector(alpha_2);
+  for(i in 1:N){
+    mu_phost[i] = transpose([alpha_1[i], alpha_2[i], 0]);
+    phost[i] ~ dirichlet(softmax(mu_phost[i]) * phi);
+  }
+  // Random covariates
+  Bphyl ~ normal(Bphyl_mu, Bphyl_sd);
+  Bfunc ~ normal(Bfunc_mu, Bfunc_sd);
+  Bfunc_0 ~ normal(Bfunc_mu_0, Bfunc_sd_0);
+  nspec_host ~ binomial(nspec_all, phspec);
+
+  // Multinomial draw of host group proportions
+  for(i in 1:N){
+	nsampArr[i] ~ multinomial(phost[i]);
+  }
+
+  // Likelihood linked to linear predictor
+  ninf_hosts ~ binomial(nsamp_hosts, inv_logit(logit_theta));  
+}
+generated quantities {
+  vector[G] briersc;   // Brier score for each genera
+  vector[N] theta;
+  vector[N] phost_all;
+  matrix[G,N] resid2;
+  vector[le_sprich] pred_sprich_1;
+  vector[le_sprich] pred_sprich_2;
+  vector[le_sprich] pred_sprich_3;
+  vector[le_phost] pred_mainH_1;
+  vector[le_phost] pred_mainH_2;
+  vector[le_phost] pred_mainH_3;
+
+  for (g in 1:G){
+    for (n in 1:N){
+      resid2[g,n]  = pow((ninf_hosts[n] * 1.0 /nsamp_hosts[n]) - inv_logit(logit_theta[n]), 2) * (genus[n]==g);
+    }
+    briersc[g] = sum(resid2[g,]);
+  }
+  for (n in 1:N){
+  	phost_all[n] = phost[n,1] + phost[n,2];
+  }	
+  theta = inv_logit(logit_theta);
+
+  // predictions for variables specrich and mainH
+    pred_sprich_1 = inv_logit( (mu[1] - mean(sprich)* beta_std[5, 1] / sd(sprich)) + (beta_std[5, 1] / sd(sprich)) * varp_sprich);
+    pred_sprich_2 = inv_logit( (mu[2] - mean(sprich)* beta_std[5, 2] / sd(sprich)) + (beta_std[5, 2] / sd(sprich)) * varp_sprich);
+    pred_sprich_3 = inv_logit( (mu[3] - mean(sprich)* beta_std[5, 3] / sd(sprich)) + (beta_std[5, 3] / sd(sprich)) * varp_sprich);
+
+    pred_mainH_1 = inv_logit( (mu[1] - mean(phost_main)* beta_std[3, 1] / sd(phost_main)) + (beta_std[3, 1] / sd(phost_main)) * varp_phost);
+    pred_mainH_2 = inv_logit( (mu[2] - mean(phost_main)* beta_std[3, 2] / sd(phost_main)) + (beta_std[3, 2] / sd(phost_main)) * varp_phost);
+    pred_mainH_3 = inv_logit( (mu[3] - mean(phost_main)* beta_std[3, 3] / sd(phost_main)) + (beta_std[3, 3] / sd(phost_main)) * varp_phost);
+}'
+
+## Save model as temporary file
+cat(model_mv, file=(ModelCodeFull_prev <- tempfile()))
+
+model_pr.norm <- suppressWarnings(readLines((ModelCodeFull_prev)))
+#model_pr.norm[grep("beta-priors", model_pr.norm)] <- "beta_std[k,g] ~ normal(0, sigma_beta); // beta-priors"    ##normal(0, 1)
+model_pr.norm[grep("beta-priors", model_pr.norm)] <- "beta_std[k,g] ~ normal(0, 1); // beta-priors"    
+
+model_pr.studt <- suppressWarnings(readLines((ModelCodeFull_prev)))
+model_pr.studt[grep("beta-priors", model_pr.norm)] <- "beta_std[k,g] ~ student_t(3, 0, 1); // beta-priors"     ##, student_t(df = 4, 0, 2.5)
+model_pr.studt[grep("beta-priors", model_pr.norm)] <- "beta_std[k,g] ~ student_t(4, 0, 2.5); // beta-priors"   
+
+### cmd_mod_norm <- cmdstan_model(write_stan_file(model_pr.norm), stanc_options = list('canonicalize=deprecations,braces,parentheses'))
+### fit_norm <- cmd_mod_norm$sample(data = stan_data, chains = 4, iter_warmup = 5000, parallel_chains = 4, refresh = 1000)
+
+
+fit_norm = stan(model_code = model_pr.norm, data=stan_data) 
+## fit_rhs = stan(model_code = model_mv, data=stan_data, iter = 10000, warmup = 10000-2000)
+## fit_studt = stan(model_code = model_pr.studt, data=stan_data) 
+
+
+posterior <- as_draws_df(fit_norm)
+## posterior <- as_draws_df(fit_studt)
+## posterior <- as_draws_df(fit_rhs)
+
+# Beta coefficient samples
+beta_std <- posterior[,grep("beta_std", dimnames(posterior)[[2]])]
+colnames(beta_std) <- paste0("beta_", rep(var_name, ngenus), "_", sort(rep(genus_name, nvar)))
+beta_std_long <- beta_std %>%  
+		pivot_longer(cols = starts_with("beta"), names_to = "variable", values_to = "value")
+
+beta_std_long <- separate_wider_delim(beta_std_long, col= "variable", delim = "_", names = c("coef", "variable", "genus")) 
+
+# filter Leucozytozoon-B_func as not modelled
+beta_std_long <- beta_std_long[-which(beta_std_long$genus=="Leucocytozoon" & beta_std_long$variable=="B.func"), ]
+
+post_beta.std <- (summarise_draws(subset_draws(posterior, variable ="beta_std")))
+post_beta.std <- post_beta.std %>% mutate(variable = rep(var_name, ngenus),
+					    genus = sort(rep(genus_name, nvar)),
+					    effect = ifelse(q5<0&q95<0, "neg", NA),
+					    effect = ifelse(q5>0&q95>0, "pos", effect))
+
+
+# Add indicator variable iif effect is significant
+
+beta.sign_genera <- post_beta.std$genus[which(!is.na(post_beta.std$effect))]
+beta.sign_variable <- post_beta.std$variable[which(!is.na(post_beta.std$effect))]
+
+beta_std_long <- beta_std_long %>% mutate(effect = 0.2)
+for(x in 1:length(beta.sign_genera)){
+	beta_std_long <- beta_std_long %>% mutate(effect = ifelse(genus==beta.sign_genera[x] & variable==beta.sign_variable[x], 1, effect))
+}
+
+
+####
+# Color palettes for plotting
+
+col_genus <- hcl.colors(ngenus, "Pastel 1", alpha=1)
+col_genus_dark <- hcl.colors(ngenus, "Set 2", alpha=1)
+col_variables <-  c(hcl.colors(2, "RedOr", alpha=1), hcl.colors(5, "Viridis", alpha=1))     ##hcl.colors(nvar, "Viridis", alpha=1)
+# 8 colors: col_variables <-  c(hcl.colors(2, "RedOr", alpha=1), hcl.colors(6, "Viridis", alpha=1))  
+col_region <- hcl.colors(nregion, "Zissou 1", alpha=1)
+
+strip <- ggh4x::strip_themed(background_x = elem_list_rect(fill = col_genus, alpha=0.95))
+
+
+####
+# Violin plot of Beta coefficients
+
+
+plot_Beta.viol <- 
+   beta_std_long %>%
+   mutate(variable = fct_relevel(variable, var_name[7:1])) %>%
+   mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon'))) %>%
+  ggplot(aes(y = value, x = variable, fill=variable, alpha=effect)) +
+  geom_hline(yintercept=0, color = "gray", linewidth=1.2) +
+  geom_violin() +
+  geom_point(size=0.5, pch=15, color = "gray30")+
+  stat_summary(fun=mean, geom="point", shape=15, size=3, color = "gray30") + 
+#  facet_wrap(~genus) + 
+   facet_wrap2(~genus, strip = strip) +
+  coord_flip() + 
+  labs(x = 'Host assemblage metrics', y = 'Estimate') + 
+  scale_fill_manual(values=col_variables) +
+  theme(legend.position = "none", axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), axis.title.x = element_text(size = 14), 
+        axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 16))
+plot_Beta.viol  
+
+### ggsave(file="plot_Beta.viol.tiff", plot_Beta.viol, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+####
+# Posterior estimates of random variables
+
+post_theta <- summarise_draws(subset_draws(posterior, variable = "theta"))
+post_Bphyl <- summarise_draws(subset_draws(posterior, variable = "Bphyl"))
+post_Bfunc <- summarise_draws(subset_draws(posterior, variable = "Bfunc"))
+post_phost_main <- summarise_draws(subset_draws(posterior, variable = "phost_main"))
+post_phost_marg <- summarise_draws(subset_draws(posterior, variable = "phost_marg"))
+post_phost_all <- summarise_draws(subset_draws(posterior, variable = "phost_all"))
+post_mu <- summarise_draws(subset_draws(posterior, variable = "mu"))
+
+
+post_pred.sprich_1 <- summarise_draws(subset_draws(posterior, variable = "pred_sprich_1"))
+post_pred.sprich_2 <- summarise_draws(subset_draws(posterior, variable = "pred_sprich_2"))
+post_pred.sprich_3 <- summarise_draws(subset_draws(posterior, variable = "pred_sprich_3"))
+
+post_pred_mainH_1 <- summarise_draws(subset_draws(posterior, variable = "pred_mainH_1"))
+post_pred_mainH_2 <- summarise_draws(subset_draws(posterior, variable = "pred_mainH_2"))
+post_pred_mainH_3 <- summarise_draws(subset_draws(posterior, variable = "pred_mainH_3"))
+
+
+colnames(post_theta) <- paste0("theta_", colnames(post_theta))
+colnames(post_Bphyl) <- paste0("Bphyl_", colnames(post_Bphyl))
+colnames(post_Bfunc) <- paste0("Bfunc_", colnames(post_Bfunc))
+colnames(post_phost_main) <- paste0("phost_main_", colnames(post_phost_main))
+colnames(post_phost_marg) <- paste0("phost_marg_", colnames(post_phost_marg))
+colnames(post_phost_all) <- paste0("phost_all_", colnames(post_phost_all))
+
+post <- cbind(post_theta, post_Bphyl, post_Bfunc, post_phost_marg, post_phost_main, post_phost_all)
+post$genus <- D.lin_pt.sel$genus
+post$nsamp_all <- D.lin_pt.sel$nsamp_all
+post$region  <- D.lin_pt.sel$realm 
+post$SpRichness  <- D.lin_pt.sel$Bird.specrich
+post$host_range  <- D.lin_pt.sel$HostRange_Chao_mean
+post$pt.id <- D.lin_pt.sel$pt.id
+
+post <- as_tibble(post) %>%
+		mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon'))) %>%
+		mutate(region = fct_relevel(region, c("Nearctic", "Palearctic", "Neotropical", "Afrotropical")))
+
+
+
+############
+# Plot of random vaiable (relationships))
+
+plot_Bphyl_theta <- 
+   ggplot(post, aes(y = theta_mean, x = Bphyl_mean, col=region)) + 
+   geom_point(size=log(post$nsamp_all)/1.5, pch=19) +
+   geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, linewidth=0.4) +
+   geom_errorbar(aes(xmin=Bphyl_q5, xmax=Bphyl_q95), width=0.001, linewidth=0.4) +
+   geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  Bphyl_mean), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+   #geom_smooth(method = "loess") +  
+   #facet_wrap(~genus, scales = "free_x") + 
+   facet_wrap2(~genus, strip = strip) +
+   scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+   labs(x = expression(paste('Phylogenetic host specificity  (', B[phyl], ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+   theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 14)) 
+plot_Bphyl_theta
+### ggsave(file="plot_Bphyl_theta.tiff", plot_Bphyl_theta, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+
+plot_Bfunc_theta <- 
+  ggplot(post, aes(y = theta_mean, x = Bfunc_mean, col=region)) + 
+  geom_point(size=log(post$nsamp_all)/1.5, pch=19)+
+  geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, size=0.4) +
+  geom_errorbar(aes(xmin=Bfunc_q5, xmax=Bfunc_q95), width=0.001, size=0.4) +
+  geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  Bfunc_mean), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+  #geom_smooth(method = "loess", aes(fill = genus)) +  
+  #facet_wrap(~genus, scales = "free_x") + 
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = expression(paste('Functional host specificity  (', B[func], ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 14)) 
+plot_Bfunc_theta
+### ggsave(file="plot_Bfunc_theta.tiff", plot_Bfunc_theta, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+
+plot_mainH.avail_theta <- 
+  ggplot(post, aes(y = theta_mean, x = phost_main_mean, col=region)) + 
+  geom_point(size=log(post$nsamp_all)/1.5, pch=19)+
+  geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, size=0.4) +
+  geom_errorbar(aes(xmin=phost_main_q5, xmax=phost_main_q95), width=0.001, size=0.4) +
+  geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  phost_main_mean), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+  #geom_smooth(method = "loess", aes(fill = genus)) +  
+  #facet_wrap(~genus, scales = "free_x") + 
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = expression(paste('Main host avaiability  (', mainH[avail], ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), strip.text.x = element_text(size = 16)) 
+plot_mainH.avail_theta
+### ggsave(file="plot_mainH.avail_theta.tiff", plot_mainH.avail_theta, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+#########
+# Plot thea+ mainH relationship with predictions
+
+post_pred.mainH <- rbind(post_pred_mainH_1, post_pred_mainH_2, post_pred_mainH_3)
+post_pred.mainH$genus <- sort(rep(genus_name, dim(post_pred_mainH_1)[1]))
+post_pred.mainH$phost <- rep(stan_data$varp_phost, 3)
+post_pred.mainH <- post_pred.mainH %>% select(mean, q5, q95, phost, genus)
+post_pred.mainH$theta_mean <-  NA
+post_pred.mainH$theta_q5 <- NA
+post_pred.mainH$theta_q95 <- NA
+post_pred.mainH$phost_main_mean <-  NA
+post_pred.mainH$phost_main_q5 <-  NA
+post_pred.mainH$phost_main_q95 <-  NA
+post_pred.mainH$region <- NA
+post_pred.mainH$nsamp_all <- NA
+
+post_sel.mainH <- post %>% select(theta_mean,  theta_q5, theta_q95, phost_main_mean,  phost_main_q5, phost_main_q95, genus, region, nsamp_all) 
+post_sel.mainH$phost <- NA
+post_sel.mainH$mean <- NA
+post_sel.mainH$q5 <- NA
+post_sel.mainH$q95 <- NA
+
+post_sel.mainH <- bind_rows(post_pred.mainH, post_sel.mainH) %>%
+		mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon'))) %>%
+		mutate(region = fct_relevel(region, c("Nearctic", "Palearctic", "Neotropical", "Afrotropical")))
+
+plot_mainH.avail_theta_pred <- 
+  ggplot(post_sel.mainH, aes(y = theta_mean, x = phost_main_mean, col=region)) + 
+
+  geom_point(aes(y =  mean, x = phost), color='gray30',  size=0.3, pch=19) +
+  geom_errorbar(aes(ymin=q5, ymax=q95, x = phost), color='gray80', width=0.01, linewidth=0.4) +
+
+  geom_point( aes(y = theta_mean, x = phost_main_mean, col=region), size=log(post_sel.mainH$nsamp_all)/1.5, pch=19) +
+  geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, size=0.4) +
+  geom_errorbar(aes(xmin=phost_main_q5, xmax=phost_main_q95), width=0.001, size=0.4) +
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = expression(paste('Main host avaiability  (', mainH[avail], ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), strip.text.x = element_text(size = 16)) 
+plot_mainH.avail_theta_pred
+### ggsave(file="plot_mainH.avail_theta_pred.tiff", plot_mainH.avail_theta_pred, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+
+
+plot_margH.avail_theta <- 
+  ggplot(post, aes(y = theta_mean, x = phost_marg_mean, col=region)) + 
+  geom_point(size=log(post$nsamp_all)/1.5, pch=19)+
+  geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, size=0.4) +
+  geom_errorbar(aes(xmin=phost_marg_q5, xmax=phost_marg_q95), width=0.001, size=0.4) +
+  geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  phost_marg_mean), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+  #geom_smooth(method = "loess", aes(fill = genus)) +  
+  #facet_wrap(~genus, scales = "free_x") + 
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = expression(paste('Marginal host species avaiability  (', margH[avail], ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 14)) 
+plot_margH.avail_theta
+### ggsave(file="plot_allH.avail_theta.tiff", plot_allH.avail_theta, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+plot_hostrange_theta <- 
+  ggplot(post, aes(y = theta_mean, x = host_range, col=region)) + 
+  geom_point(size=log(post$nsamp_all)/1.5, pch=19)+
+  geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, size=0.4) +
+  geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  host_range), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = 'Host range (Chao estimate)', y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 14)) 
+plot_hostrange_theta
+
+
+plot_SpRich_theta <- 
+  ggplot(post, aes(y = theta_mean, x = SpRichness, col=region)) + 
+  geom_point(size=log(post$nsamp_all)/1.5, pch=19)+
+  geom_errorbar(aes(ymin=theta_q5, ymax=theta_q95), width=0.001, size=0.4) +
+  geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  SpRichness), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+  #geom_smooth(method = "loess", aes(fill = genus)) +  
+  #geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  SpRichness), method = "glm", aes(fill = genus)) +  
+  #facet_wrap(~genus, scales = "free_x") + 
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = expression(paste('Bird species richness  (', SpRich, ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), strip.text.x = element_text(size = 16)) 
+plot_SpRich_theta
+### ggsave(file="plot_SpRich_theta.tiff", plot_SpRich_theta, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+
+#########
+# Plot thea+spec richness relationship with predictions
+
+post_pred.sprich <- rbind(post_pred.sprich_1, post_pred.sprich_2, post_pred.sprich_3)
+post_pred.sprich$genus <- sort(rep(genus_name, dim(post_pred.sprich_1)[1]))
+post_pred.sprich$SpRichness <- rep(stan_data$varp_sprich, 3)
+post_pred.sprich <- post_pred.sprich %>% select(mean, q5, q95, SpRichness, genus)
+post_pred.sprich$theta_mean <-  NA
+post_pred.sprich$theta_q5 <- NA
+post_pred.sprich$theta_q95 <- NA
+post_pred.sprich$region <- NA
+post_pred.sprich$nsamp_all <- NA
+
+post_sel.sprich <- post %>% select(theta_mean,  theta_q5, theta_q95, SpRichness, genus, region, nsamp_all) 
+post_sel.sprich$mean <- NA
+post_sel.sprich$q5 <- NA
+post_sel.sprich$q95 <- NA
+
+post_sel.sprich <- bind_rows(post_sel.sprich, post_pred.sprich) %>%
+		mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon'))) %>%
+		mutate(region = fct_relevel(region, c("Nearctic", "Palearctic", "Neotropical", "Afrotropical")))
+
+plot_SpRich_theta_pred <- 
+  ggplot(post_sel.sprich, aes(y = theta_mean, x = SpRichness, col=region)) + 
+
+  geom_point(aes(y =  mean, x = SpRichness), color='gray30',  size=0.3, pch=19) +
+ geom_errorbar(aes(ymin=q5, ymax=q95, x = SpRichness), color='gray80', width=0.01, linewidth=0.4) +
+
+  geom_point( aes(y = theta_mean, x = SpRichness, col=region), size=log(post_sel.sprich$nsamp_all)/1.5, pch=19) +
+  geom_errorbar( aes(ymin=theta_q5, ymax=theta_q95), width=0.001, linewidth=0.4) +
+ # geom_smooth(inherit.aes = F, aes(y = theta_mean, x =  SpRichness), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+
+  facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = expression(paste('Bird species richness  (', SpRich, ')')), y = expression(paste('Lineage prevalence  (', Psi[all], ')'))) + theme_bw() +
+  theme(axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), strip.text.x = element_text(size = 16)) 
+plot_SpRich_theta_pred
+### ggsave(file="plot_SpRich_theta_pred.tiff", plot_SpRich_theta_pred, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+##################
+
+plot_Bphyl_Bfunc <- 
+   ggplot(post, aes(y = Bfunc_mean, x = Bphyl_mean, col=region)) + 
+   geom_point(size=log(post$nsamp_all)/1.5, pch=19) +
+   geom_errorbar(aes(ymin=Bfunc_q5, ymax=Bfunc_q95), width=0.001, size=0.4) +
+   geom_errorbar(aes(xmin=Bphyl_q5, xmax=Bphyl_q95), width=0.001, size=0.4) +
+   #geom_smooth(inherit.aes = F, aes(y = Bfunc_mean, x =  Bphyl_mean), method = mgcv::gam, method.args = list(family="betar"), formula = y ~ s(x, bs = "cs"), colour="gray50") +
+   geom_smooth(method = "glm") +  
+   #facet_wrap(~genus, scales = "free_x") + 
+   facet_wrap2(~genus, strip = strip) +
+   scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+   labs(x = expression(paste('Phylogenetic host specificity  (', B[phyl], ')')), y = expression(paste('Functional host specificity  (', B[func], ')'))) + theme_bw() +
+   theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 14)) 
+plot_Bphyl_Bfunc
+
+# Joint plot of theta  ~ main host availability and theta ~ species richness
+plot_mainH_and_SpRich <- gridExtra::grid.arrange(plot_mainH.avail_theta, plot_SpRich_theta, ncol =2)
+### ggsave(file="plot_mainH_and_SpRich.tiff", plot_mainH_and_SpRich, dpi=300, width = 3.307*6, height = 3.307*2, units = 'in')
+
+
+####
+# Plot specificity
+
+pos.jitter = position_jitter(width = 0.3, seed=1)
+
+dplot_Bfunc <- post_Bfunc %>% mutate(effect = 0.3,
+				effect = ifelse(Bfunc_q5<0&Bfunc_q95<0, 1, effect),
+			      effect = ifelse(Bfunc_q5>0&Bfunc_q95>0, 1, effect),
+				genus = D.lin_pt.sel$genus,
+				region = D.lin_pt.sel$realm) %>%
+		            mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon')))
+
+dplot_Bphyl <- post_Bphyl %>% mutate(effect = 0.3,
+				effect = ifelse(Bphyl_q5<0&Bphyl_q95<0, 1, effect),
+			      effect = ifelse(Bphyl_q5>0&Bphyl_q95>0, 1, effect),
+				genus = D.lin_pt.sel$genus,
+				region = D.lin_pt.sel$realm) %>%
+		            mutate(genus = fct_relevel(genus, c('Plasmodium', 'Parahaemoproteus', 'Leucocytozoon')))
+
+plot_Bfunc <- 
+  ggplot(dplot_Bfunc, aes(y = Bfunc_mean, x = genus, fill=genus)) + 
+  geom_hline(yintercept=0, color = "lightgray", linewidth=2,) +
+  geom_violin() +
+  geom_point( size=1.5, pch=19, position=pos.jitter, alpha=dplot_Bfunc$effect) +
+  geom_errorbar(aes(ymin= Bfunc_q5, ymax= Bfunc_q95), width=0.001, linewidth=0.4, position=pos.jitter, alpha=dplot_Bfunc$effect) + 
+  #scale_color_manual(values=c("Plasmodium" = col_genus[1], "Parahaemoproteus" = col_genus[2], "Leucocytozoon" = col_genus[3], "gr1" = "grey95", "gr2" = "grey85")) +
+  scale_fill_manual(values=c("Plasmodium" = col_genus[1], "Parahaemoproteus" = col_genus[2], "Leucocytozoon" = col_genus[3])) +
+ 
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+
+  labs(x = '', y = expression(paste('Host specificity  (', B[func], ')'))) + 
+  theme_bw() +
+ facet_grid(. ~ "Functional specificity") +
+  theme(legend.position = "none", axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), 
+	  strip.text.x = element_text(size = 16), strip.background = element_rect(fill=col_variables[6])) 
+plot_Bfunc
+##title = "Functional specificity"; ,  , fill=genus aes(col=region),
+
+plot_Bphyl <- 
+  ggplot(dplot_Bphyl, aes(y = Bphyl_mean, x = genus, fill=genus)) + 
+  geom_hline(yintercept=0, color = "lightgray", linewidth=2,) +
+  geom_violin() +
+  geom_point(size=1.5, pch=19, position=pos.jitter, alpha=dplot_Bphyl$effect) +
+  geom_errorbar(aes(ymin= Bphyl_q5, ymax= Bphyl_q95), width=0.001, linewidth=0.4, position=pos.jitter, alpha=dplot_Bphyl$effect, ) + 
+  #scale_color_manual(values=c("Plasmodium" = col_genus[1], "Parahaemoproteus" = col_genus[2], "Leucocytozoon" = col_genus[3], "gr1" = "grey95", "gr2" = "grey85")) +
+  scale_fill_manual(values=c("Plasmodium" = col_genus[1], "Parahaemoproteus" = col_genus[2], "Leucocytozoon" = col_genus[3])) +
+  scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = '', y = expression(paste('Host specificity  (', B[phyl], ')'))) + 
+  theme_bw() +
+ facet_grid(. ~ "Phylogenetic specificity") +
+  theme(legend.position = "none", axis.text.x = element_text(size = 16), axis.text.y = element_text(size = 16), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), 
+	  strip.text.x = element_text(size = 16), strip.background = element_rect(fill=col_variables[7])) 
+plot_Bphyl
+## , fill=genus aes(col=region), 
+
+plot_Specificity <- gridExtra::grid.arrange(plot_Bphyl, plot_Bfunc, ncol =2)
+plot_Specificity
+### ggsave(file="plot_Specificity.tiff", plot_Specificity, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+
+
+plot_nHost.obs <- 
+  ggplot(D.lin_pt.sel, aes(y = nspec_infect, x = genus, fill=genus)) + 
+  geom_hline(yintercept=0, color = "lightgray", linewidth=2,) +
+  geom_violin() +
+  geom_point(size=1.5, pch=19, position=pos.jitter, alpha=0.9) +
+    #scale_color_manual(values=c("Plasmodium" = col_genus[1], "Parahaemoproteus" = col_genus[2], "Leucocytozoon" = col_genus[3], "gr1" = "grey95", "gr2" = "grey85")) +
+  scale_fill_manual(values=c("Plasmodium" = col_genus[1], "Parahaemoproteus" = col_genus[2], "Leucocytozoon" = col_genus[3])) +
+  labs(x = "", y = "Number of observed host species") + 
+  theme_bw() +
+ facet_grid(. ~ "Number of observed host species") +
+  theme(legend.position = "none", axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), strip.text.x = element_text(size = 16)) 
+plot_nHost.obs
+### ggsave(file="plot_nHost.obs.tiff", plot_nHost.obs, dpi=300, width = 3.307*4, height = 3.307*2, units = 'in')
+# , title = "Number of observed host species"
+
+plot_host_obs_vs_Chao <- 
+  ggplot(D.lin_pt.sel, aes(y = HostRange_Chao_mean, x = nspec_infect, color=genus)) + 
+  geom_abline (slope=1, linetype = "dashed", color="darkgrey") +
+  geom_point(size=1.5, pch=19, alpha=1, position=pos.jitter) +
+  geom_errorbar(aes(ymin=(HostRange_Chao_mean -HostRange_Chao_sd), ymax=(HostRange_Chao_mean +HostRange_Chao_sd)), position=pos.jitter, width=0.001, size=0.4) +
+  scale_color_manual(values=c("Plasmodium" = col_genus_dark[1], "Parahaemoproteus" = col_genus_dark[2], "Leucocytozoon" = col_genus_dark[3], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = "Number of observed host species", y = "Host range estimate (Chao)") + 
+  theme_bw() +
+ ##facet_grid(. ~ "Number of observed host species") +
+  theme( axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 16), axis.title.y = element_text(size = 16), strip.text.x = element_text(size = 16)) 
+plot_host_obs_vs_Chao
+### ggsave(file="plot_host_obs_vs_Chao.tiff", plot_host_obs_vs_Chao, dpi=300, width = 3.307*2, height = 3.307*2, units = 'in')
+
+
+plot_phost_main_all <- 
+  ggplot(post, aes(y = phost_all_mean, x = phost_main_mean, color=genus)) + 
+  geom_abline (slope=1, linetype = "dashed", color="darkgrey") +
+  geom_point(size=log(post$nsamp_all)/1.5, pch=19) +
+  geom_errorbar(aes(ymin= phost_all_q5, ymax= phost_all_q95), width=0.001, size=0.4) +
+  geom_errorbar(aes(xmin=phost_main_q5, xmax=phost_main_q95), width=0.001, size=0.4) +  
+  #facet_wrap(~genus, scales = "free_x") + 
+  #facet_wrap2(~genus, strip = strip) +
+  scale_color_manual(values=c("Plasmodium" = col_genus_dark[1], "Parahaemoproteus" = col_genus_dark[2], "Leucocytozoon" = col_genus_dark[3])) +
+  #scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+  labs(x = 'Main host avaiability', y = 'All host avaiability') + theme_bw() +
+  theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), axis.title.y = element_text(size = 14), strip.text.x = element_text(size = 14)) 
+plot_phost_main_all
+
+### ggsave(file="plot_phost_main_all.tiff", plot_phost_main_all, dpi=300, width = 3.307*3, height = 3.307*2, units = 'in')
+
