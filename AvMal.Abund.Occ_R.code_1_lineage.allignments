@@ -1,0 +1,173 @@
+################
+# Align all sequences to MalAvi Database (http://130.235.244.92/Malavi/)
+################
+
+##########
+# Settings Kons-device
+
+Drive <- "F"
+
+dir.stem <- paste0(Drive,  ":/Kons_backup/Projekte_kons/2021.07_AvMal_lineage.spread/")
+dir.data <- paste0(dir.stem,  "/AvMal.lin_Data/")
+dir.analysis <- paste0(dir.stem,  "/AvMal.prev_Analysis/")
+dir.env <- paste0(dir.stem,  "AvMal.prev_EnvData")
+
+dir.geodata <- paste(Drive,  ":/GeoData/", sep = "")
+setwd(dir.stem)
+
+
+# Load R packages
+library(tidyverse)
+library(malaviR)
+
+# World map
+library(rnaturalearth)
+worldmap <- ne_countries(scale = "medium", type = "countries", returnclass = "sf")[1]
+
+setwd(dir.data)
+D.AVM <- as_tibble(read.csv("GlobalDataSet_230830.csv", header=T))
+
+# Plot location of all samples
+ggplot(worldmap) + geom_sf() +
+geom_point(data = D.AVM, aes(x = Longitude, y = Latitude), size = 2, shape = 19, fill = "darkred")
+
+
+# Dataframe to store results from MalAvi BLAST search
+D.blast=data.frame(
+	Lineage_1 = D.AVM$Lineage.Name_1, 
+	Lineage.Cyt.B_1 = D.AVM$Lineage.Cyt.B_1,
+	nchar_1 = as.numeric(lapply(D.AVM$Lineage.Cyt.B_1, nchar)),
+	MalAvi_Lineage_1.1 = NA,  MalAvi_Lineage_1.2 = NA, MalAvi_Lineage_1.3 = NA,
+	MalAvi_Score_1.1 = NA, 	MalAvi_Score_1.2 = NA, MalAvi_Score_1.3 = NA,
+	MalAvi_Identities_1.1 = NA, 	MalAvi_Identities_1.2 = NA,  MalAvi_Identities_1.3 = NA,
+	match_1 = NA,
+
+	Lineage_2 = D.AVM$Lineage.Name_2, 
+	Lineage.Cyt.B_2 = D.AVM$Lineage.Cyt.B_2,
+	nchar_2 = as.numeric(lapply(D.AVM$Lineage.Cyt.B_2, nchar)),
+	MalAvi_Lineage_2.1 = NA, 	MalAvi_Lineage_2.2 = NA, MalAvi_Lineage_2.3 = NA,
+	MalAvi_Score_2.1 = NA, 	MalAvi_Score_2.2 = NA, MalAvi_Score_2.3 = NA,
+	MalAvi_Identities_2.1 = NA, 	MalAvi_Identities_2.2 = NA,  MalAvi_Identities_2.3 = NA,
+	match_2 = NA,
+
+	Lineage_3 = D.AVM$Lineage.Name_3, 
+	Lineage.Cyt.B_3 = D.AVM$Lineage.Cyt.B_3,
+	nchar_3 = as.numeric(lapply(D.AVM$Lineage.Cyt.B_3, nchar)),
+	MalAvi_Lineage_3.1 = NA, 	MalAvi_Lineage_3.2 = NA, MalAvi_Lineage_3.3 = NA,
+	MalAvi_Score_3.1 = NA, 	MalAvi_Score_3.2 = NA, MalAvi_Score_3.3 = NA,
+	MalAvi_Identities_3.1 = NA, 	MalAvi_Identities_3.2 = NA,  MalAvi_Identities_3.3 = NA,
+	match_3 = NA,
+
+	Lineage_4 = D.AVM$Lineage.Name_4, 
+	Lineage.Cyt.B_4 = D.AVM$Lineage.Cyt.B_4,
+	nchar_4 = as.numeric(lapply(D.AVM$Lineage.Cyt.B_4, nchar)),
+	MalAvi_Lineage_4.1 = NA, 	MalAvi_Lineage_4.2 = NA, MalAvi_Lineage_4.3 = NA,
+	MalAvi_Score_4.1 = NA, 	MalAvi_Score_4.2 = NA, MalAvi_Score_4.3 = NA,
+	MalAvi_Identities_4.1 = NA, 	MalAvi_Identities_4.2 = NA,  MalAvi_Identities_4.3 = NA,
+	match_4 = NA,
+
+	Lineage_5 = D.AVM$Lineage.Name_5, 
+	Lineage.Cyt.B_5 = D.AVM$Lineage.Cyt.B_5,
+	nchar_5 = as.numeric(lapply(D.AVM$Lineage.Cyt.B_5, nchar)),
+	MalAvi_Lineage_5.1 = NA, 	MalAvi_Lineage_5.2 = NA, MalAvi_Lineage_5.3 = NA,
+	MalAvi_Score_5.1 = NA, 	MalAvi_Score_5.2 = NA, MalAvi_Score_5.3 = NA,
+	MalAvi_Identities_5.1 = NA, 	MalAvi_Identities_5.2 = NA,  MalAvi_Identities_5.3 = NA,
+	match_5 = NA)
+
+## Loop over sequence for MalAvi BLAST search
+for(i in 1: dim(D.blast)[1]){
+	seqsel <- D.blast$Lineage.Cyt.B_1[i]
+	if(seqsel!=""){
+	blast <- blast_malavi(seqsel)
+	D.blast$MalAvi_Lineage_1.1[i] <- blast$Lineage[1]
+	D.blast$MalAvi_Lineage_1.2[i] <- blast$Lineage[2]
+	D.blast$MalAvi_Lineage_1.3[i] <- blast$Lineage[2]
+	D.blast$MalAvi_Identities_1.1[i] <- blast$Identities[1]
+	D.blast$MalAvi_Identities_1.2[i] <- blast$Identities[2]
+	D.blast$MalAvi_Identities_1.3[i] <- blast$Identities[2]
+	D.blast$MalAvi_Score_1.1[i] <- blast$Score[1]
+	D.blast$MalAvi_Score_1.2[i] <- blast$Score[2]
+	D.blast$MalAvi_Score_1.3[i] <- blast$Score[2]
+
+	D.blast$match_1[i] <-  ifelse(D.blast$Lineage_1[i]==D.blast$MalAvi_Lineage_1.1[i], 1, 999)
+	}else{}
+	print(paste0(i, " out of ", dim(D.blast)[1]))
+}
+
+for(i in 1: dim(D.blast)[1]){
+	seqsel <- D.blast$Lineage.Cyt.B_2[i]
+	if(seqsel!=""){
+	blast <- blast_malavi(seqsel)
+	D.blast$MalAvi_Lineage_2.1[i] <- blast$Lineage[1]
+	D.blast$MalAvi_Lineage_2.2[i] <- blast$Lineage[2]
+	D.blast$MalAvi_Lineage_2.3[i] <- blast$Lineage[2]
+	D.blast$MalAvi_Identities_2.1[i] <- blast$Identities[1]
+	D.blast$MalAvi_Identities_2.2[i] <- blast$Identities[2]
+	D.blast$MalAvi_Identities_2.3[i] <- blast$Identities[2]
+	D.blast$MalAvi_Score_2.1[i] <- blast$Score[1]
+	D.blast$MalAvi_Score_2.2[i] <- blast$Score[2]
+	D.blast$MalAvi_Score_2.3[i] <- blast$Score[2]
+
+	D.blast$match_2[i] <-  ifelse(D.blast$Lineage_1[i]==D.blast$MalAvi_Lineage_1.1[i], 1, 999)
+	}else{}
+	print(paste0(i, " out of ", dim(D.blast)[1]))
+}
+
+
+
+D.blast$Lineage.rev_1 <- D.blast$Lineage_1
+
+# All BLAST searches with score >= 881 are updated
+selBLAST_1 <- which(D.blast$MalAvi_Score_1.1 >=881)
+D.blast$Lineage.rev_1[selBLAST_1] <- D.blast$MalAvi_Lineage_1.1[selBLAST_1]
+
+# All BLAST searches with sequence lengths < bp 477 are updated
+selBLAST_1 <- which(D.blast$nchar_1 <477 & D.blast$Lineage_1!="" )
+D.blast$Lineage.rev_1[selBLAST_1] <- D.blast$MalAvi_Lineage_1.1[selBLAST_1]
+
+# scors < 881 for long sequences < 477 are not updated
+selDB <- which(D.blast$MalAvi_Score_1.1 <881 & D.blast$nchar_1 >=477)
+
+#mismatches with scores < 881 and long sequences >477
+length(  which(D.blast$MalAvi_Score_1.1 <881 & D.blast$nchar_1 >=477 & D.blast$match_1==999))
+
+
+D.blast$Lineage.rev_2 <- D.blast$Lineage_2
+selBLAST_2 <- which(D.blast$MalAvi_Score_2.1 >=881)
+D.blast$Lineage.rev_2[selBLAST_2] <- D.blast$MalAvi_Lineage_2.1[selBLAST_2]
+selBLAST_2 <- which(D.blast$nchar_2 <477 & D.blast$Lineage_2 !="" )
+D.blast$Lineage.rev_2[selBLAST_2] <- D.blast$MalAvi_Lineage_2.1[selBLAST_2]
+
+D.blast$Lineage.rev_3 <- D.blast$Lineage_3
+selBLAST_3 <- which(D.blast$MalAvi_Score_3.1 >=881)
+D.blast$Lineage.rev_3[selBLAST_3] <- D.blast$MalAvi_Lineage_3.1[selBLAST_3]
+selBLAST_3 <- which(D.blast$nchar_3 <477 & D.blast$Lineage_3 !="")
+D.blast$Lineage.rev_3[selBLAST_3] <- D.blast$MalAvi_Lineage_3.1[selBLAST_3]
+
+D.blast$Lineage.rev_4 <- D.blast$Lineage_4
+selBLAST_4 <- which(D.blast$MalAvi_Score_4.1 >=881)
+D.blast$Lineage.rev_4[selBLAST_4] <- D.blast$MalAvi_Lineage_4.1[selBLAST_4]
+selBLAST_4 <- which(D.blast$nchar_4 <477 & D.blast$Lineage_4 !="" )
+D.blast$Lineage.rev_4[selBLAST_4] <- D.blast$MalAvi_Lineage_4.1[selBLAST_4]
+
+D.blast$Lineage.rev_5 <- D.blast$Lineage_5
+selBLAST_5 <- which(D.blast$MalAvi_Score_5.1 >=881)
+D.blast$Lineage.rev_5[selBLAST_5] <- D.blast$MalAvi_Lineage_5.1[selBLAST_5]
+selBLAST_5 <- which(D.blast$nchar_5 <477 & D.blast$Lineage_5 !="" )
+D.blast$Lineage.rev_5[selBLAST_5] <- D.blast$MalAvi_Lineage_5.1[selBLAST_5]
+
+
+D.AVM$Lineage.rev_1 <- D.blast$Lineage.rev_1
+D.AVM$Lineage.rev_2 <- D.blast$Lineage.rev_2
+D.AVM$Lineage.rev_3 <- D.blast$Lineage.rev_3
+D.AVM$Lineage.rev_4 <- D.blast$Lineage.rev_4
+D.AVM$Lineage.rev_5 <- D.blast$Lineage.rev_5
+
+D.AVM$Lineage.rev_1[which(D.AVM$Lineage.rev_1=="")] <- NA
+D.AVM$Lineage.rev_2[which(D.AVM$Lineage.rev_2=="")] <- NA
+D.AVM$Lineage.rev_3[which(D.AVM$Lineage.rev_3=="")] <- NA
+D.AVM$Lineage.rev_4[which(D.AVM$Lineage.rev_4=="")] <- NA
+D.AVM$Lineage.rev_5[which(D.AVM$Lineage.rev_5=="")] <- NA
+
+setwd(dir.data)
+write.csv(D.AVM, file="GlobalDataSet_alligned_2403.csv")
