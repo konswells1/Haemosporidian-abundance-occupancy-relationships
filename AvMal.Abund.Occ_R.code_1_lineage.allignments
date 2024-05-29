@@ -1,19 +1,6 @@
 ################
-# Align all sequences to MalAvi Database (http://130.235.244.92/Malavi/)
+# (1) Align all sequences to MalAvi Database (http://130.235.244.92/Malavi/)
 ################
-
-##########
-# Settings Kons-device
-
-Drive <- "F"
-
-dir.stem <- paste0(Drive,  ":/Kons_backup/Projekte_kons/2021.07_AvMal_lineage.spread/")
-dir.data <- paste0(dir.stem,  "/AvMal.lin_Data/")
-dir.analysis <- paste0(dir.stem,  "/AvMal.prev_Analysis/")
-dir.env <- paste0(dir.stem,  "AvMal.prev_EnvData")
-
-dir.geodata <- paste(Drive,  ":/GeoData/", sep = "")
-setwd(dir.stem)
 
 
 # Load R packages
