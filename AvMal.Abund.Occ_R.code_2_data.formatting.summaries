@@ -1,0 +1,474 @@
+
+################
+# (2) Formatting haemosporidian lineage data and assigning site-level environmental variables:  lineage-host-location data
+################
+
+
+
+# Load R packages
+library(tidyverse)
+library(raster)
+library(sf)
+library(ape)
+library(ade4)
+library(phytools)
+library(vegan)
+library(hillR)
+library(picante)
+library (iNEXT)
+library(FD)
+
+
+# World map
+library(rnaturalearth)
+worldmap <- ne_countries(scale = "medium", type = "countries", returnclass = "sf")[1]
+
+
+# Load global data set
+setwd(dir.data)
+D.AVM <- as_tibble(read.csv("GlobalDataSet_alligned_2403.csv", header=T))
+
+#######
+# Update some bird names to match those in phylogenetic tree
+D.AVM <- D.AVM %>% mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Elaenia chilensis' = 'Elaenia albiceps'))) %>% 
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Cistothorus stellaris' = 'Cistothorus platensis'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Cistothorus_platensis' = 'Cistothorus platensis'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Pyrrhura lucianii' = 'Pyrrhura picta'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Megascops usta' = 'Megascops watsonii'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Epinecrophylla amazonica' = 'Epinecrophylla erythrura'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Nystalus obamai' = 'Nystalus maculatus'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Nystalus obamai' = 'Nystalus maculatus'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Pyrrhura picta' = 'Pyrrhura lepida'))) %>%
+			 mutate(Host.Latin.Name = str_replace_all(Host.Latin.Name, c('Hemitriccus sp. nov.' = 'Hemitriccus flammulatus')))
+
+# Plot location of all samples
+ggplot(worldmap) + geom_sf() +
+geom_point(data = D.AVM, aes(x = Longitude, y = Latitude), size = 2, shape = 19, fill = "darkred")
+
+# Add column with number of infections
+D.AVM <- D.AVM %>% rowwise() %>% mutate(NLin = length(which(!is.na(c_across(starts_with("Lineage.Genus"))))))
+
+# Add column with pt.id
+D.AVM <- D.AVM %>% mutate(pt.id = paste0("pt.", Longitude, "_", Latitude))
+
+# Global association matrix based on lineage names
+D.interact.lin <- D.AVM %>% dplyr::select(Host.Latin.Name, starts_with("Lineage.rev_")) %>% pivot_longer(!Host.Latin.Name, names_to = "infect_no", values_to = "Lineage") %>% 
+		filter(!is.na(Lineage) & Lineage!="") %>% dplyr::select(-infect_no)
+Assoc.Mat.lin <- table(D.interact.lin)
+
+# Vector of all bird species names
+birds.all_name <- sort(unique(D.AVM$Host.Latin.Name))
+
+
+########
+# MalAvi Grant Lineage Summary table
+########
+
+setwd(dir.data)
+# D.MalAvi <- as_tibble(read.csv("MalAvi_Grand Lineage Summary.csv", header=T))
+D.MalAvi <- as_tibble(read.csv("MalAvi_Grand Lineage Summary_240212.csv", header=T))
+
+# Select only full MalAvi sequences
+D.MalAvi <- D.MalAvi %>% dplyr::select(Lineage_Name, accession, length, genus, species, Number_of_vectors, hosts, sequence)
+D.MalAvi %>% filter (length=="Full")
+
+unique(D.MalAvi$species)
+
+table(D.MalAvi$species, D.MalAvi$Lineage_Name)
+
+# Generate sequence file from Malavi for different genera
+D.MalAvi.PL <- D.MalAvi %>% filter (genus=="Plasmodium" & length=="Full")
+
+L.seq.PL <- str_split(D.MalAvi.PL$sequence[], "")
+names(L.seq.PL) <- D.MalAvi.PL$Lineage_Name
+setwd(dir.analysis)
+ape::write.nexus.data(L.seq.PL, file="malavi.PL.nex", format = "dna")
+
+#####
+
+
+#######
+# Bird species richness from global map (https://biodiversitymapping.org, file: ""Richness_10km_Birds_v7_EckertIV_no_seabirds.tif"")
+
+WGS84 <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
+
+map_sprich.birds <- raster("Richness_10km_Birds_v7_EckertIV_no_seabirds.tif")
+map_sprich.birds <-  projectRaster(map_sprich.birds, crs = WGS84)
+
+sp.pts <- SpatialPoints(data.frame(D.AVM$Longitude, D.AVM$Latitude), proj4string = map_sprich.birds@crs)
+D.AVM$Bird.specrich <- round(extract(map_sprich.birds, sp.pts))  
+
+
+########
+# Phylogenetic and functional distances data
+########
+
+# Phylogenetic tree birds (https://birdtree.org/,  file of 100 trees downloaded as "BirdTree100.tre")
+
+BirdTree100 <- read.tree("BirdTree100.tre")
+
+#Drop tips
+BirdTree_all <- drop.tip.multiPhylo(BirdTree100, BirdTree100[[1]]$tip.label[which(is.na(match(gsub("_", " ", BirdTree100[[1]]$tip.label), birds.all_name)))])
+
+
+# EltonTraits v1.0 (Wilman et al. (2014), https://figshare.com/articles/Data_Paper_Data_Paper/3559887)
+temp <- tempfile()
+download.file("https://ndownloader.figshare.com/files/5631081", temp)
+Elton.dat <- read.table(temp, header = TRUE,
+fill  = TRUE, quote = "\"", stringsAsFactors = FALSE,sep = "\t")
+unlink(temp)
+Elton.dat <- as.tibble(Elton.dat) 
+Elton.dat <- rename(Elton.dat, Species =Scientific)
+
+setwd(dir.analysis)
+save(Elton.dat, file="Elton.dat.RData")
+
+# Bird migration data
+setwd(dir.data)
+DatMigr  <- as.tibble(read.csv("Dufor_migration.data_210315.csv", header=T))
+DatMigr$Species <- gsub("_", " ", DatMigr$Sp.Scien.jetz)
+DatMigr  <- DatMigr  %>% dplyr::select(Species, strategy_3, distance_4, distance_quanti_RES0)
+DatMigr  <- rename(DatMigr, migrate.strategy.3=strategy_3, migrate.strategy.4=distance_4, migrate.distance=distance_quanti_RES0)
+
+# Data table for bird traits
+BirdTraits <- as.tibble(data.frame(Species = birds.all_name))
+BirdTraits <- BirdTraits %>% left_join(Elton.dat) %>% left_join(DatMigr)
+nbird <- length(BirdTraits$Species)
+
+# Choose variables to represent species proportional use of certain foraging habitat categories and proportion use of diet categories
+hab.dat <- data.frame(BirdTraits %>% dplyr::select(names(Elton.dat)[24:30]))
+rownames(hab.dat) <- BirdTraits$Species
+diet.dat <-  data.frame(BirdTraits %>% dplyr::select(names(Elton.dat)[10:19]))
+rownames(diet.dat) <- BirdTraits$Species
+
+hab.dat_f <- prep.fuzzy(hab.dat, dim(hab.dat)[2])
+diet.dat_f <- prep.fuzzy(diet.dat, dim(diet.dat)[2])
+
+# Ecological distance matrix using ade4
+ktab1 <- ade4::ktab.list.df(list(hab.dat_f, diet.dat_f, data.frame(body.mass = BirdTraits$BodyMass.Value)))
+func.dist <- ade4::dist.ktab(ktab1, type=c("F", "F", "Q"), option = c("scale", "scale", "scale"))
+	#func.dist <- ade4::dist.ktab(ktab1, type=c("Q", "Q", "Q"), option = c("scale", "scale", "scale"))
+func.dist <- as.matrix(func.dist)
+func.dist <- func.dist/ max(func.dist, na.rm=T)
+colnames(func.dist) <- rownames(func.dist) <- birds.all_name
+
+traits <- cbind(hab.dat, diet.dat, data.frame(body.mass = BirdTraits$BodyMass.Value))
+
+# Alternative option to compute Gower distances (! gives different results, not used in this study)
+##func.dist.2 <- as.matrix(FD::gowdis(traits))
+
+# Save data
+### save(func.dist, file="func.dist.RData")
+### save(traits, file="traits.RData")
+
+
+host.tree.cophenetics <- lapply(seq_along(BirdTree_all),
+function(x) {
+cophenetics <- cophenetic.phylo(BirdTree_all[[x]])
+cophenetics <- cophenetics/max(cophenetics)
+})
+phyl.dist <- Reduce(`+`, host.tree.cophenetics)/length(host.tree.cophenetics)
+rownames(phyl.dist) <- colnames(phyl.dist) <- gsub("_", " ", rownames(phyl.dist))
+
+
+######
+# Site characterization by environmental variables
+
+# Generate site-level data file
+D.pt <-  D.AVM %>% dplyr::select(pt.id, Longitude, Latitude, Country) %>% distinct()
+
+
+### Realm names
+
+# Load map of zoogeographic realms from Holt et al. 2013 (file "newRealms.shp" as availabel from https://macroecology.ku.dk/resources/wallace)
+poly_Realms <- st_read("./Map_Zooreg_Holt.2013/newRealms.shp")
+
+# Correct wrong spelling in realm name "Oceania"
+poly_Realms$Realm[which(poly_Realms$Realm=="Oceanina")] <- "Oceania"
+realm_name <- unique(poly_Realms$Realm)
+nrealm <- length(realm_name)
+
+pts.multi_all <- sf::st_multipoint(as.matrix(data.frame(D.pt$Longitude, D.pt$Latitude)))
+pts <- st_cast(st_sfc(pts.multi_all), "POINT")
+st_crs(pts) <- st_crs(poly_Realms)
+
+D.pt <- D.pt %>% mutate(realm=NA)
+for(r in 1:nrealm){
+  sf_use_s2(FALSE)
+  polyrealm <- poly_Realms %>% filter (Realm==realm_name[r])
+  polyrealm <-  polyrealm[1]
+  st_intersection(pts, polyrealm)
+  D.pt$realm[which(st_intersects(pts, polyrealm, sparse = FALSE))] <- realm_name[r]
+}
+# Fill NAs
+D.pt$realm[which(is.na(D.pt$realm) & D.pt$Country=="Chile")] <- "Neotropical"
+D.pt$realm[which(is.na(D.pt$realm) & D.pt$Country=="Brazil")] <- "Neotropical"
+
+
+
+######
+# Worldclim climate data
+
+rast_worldclim <- raster::getData("worldclim",var="bio",res=10)
+rast_worldclim <- rast_worldclim[[c("bio1", "bio4", "bio7", "bio12", "bio14", "bio15")]]
+sp.pts <- SpatialPoints(data.frame(D.pt$Longitude, D.pt$Latitude), proj4string = rast_worldclim@crs)
+worldclim.values <- raster::extract(rast_worldclim, sp.pts) 
+
+D.pt$bio1 <- as.numeric(raster::extract(rast_worldclim[["bio1"]], sp.pts, buffer= 10/101.1))/10 ## BIO1 = Annual Mean Temperature 
+D.pt$bio4 <- as.numeric(raster::extract(rast_worldclim[["bio4"]], sp.pts, buffer= 10/101.1))/10 ## BIO4 = Temperature Seasonality (standard deviation ×100)
+D.pt$bio7 <- as.numeric(raster::extract(rast_worldclim[["bio7"]], sp.pts, buffer= 10/101.1))/10 ## BIO7 = Temperature Annual Range (BIO5-BIO6)
+D.pt$bio12 <- as.numeric(raster::extract(rast_worldclim[["bio12"]], sp.pts, buffer= 10/101.1 ))  ## BIO12 = Annual Precipitation
+D.pt$bio14 <- as.numeric(raster::extract(rast_worldclim[["bio14"]], sp.pts, buffer= 10/101.1 ))  ## BIO14 = Precipitation of Driest Month
+D.pt$bio15 <- as.numeric(raster::extract(rast_worldclim[["bio15"]], sp.pts, buffer= 10/101.1 ))  ## BIO15 = Precipitation Seasonality (Coefficient of Variation)
+
+
+#################
+
+
+###########
+# Generate long table with lineages in host individuals (from multiple infections) and assign genus names to lineages
+
+# Vectors of data from records
+D.Lin.long_lin <- D.AVM %>% dplyr::select("Rec.ID", starts_with("Lineage.rev_")) %>% pivot_longer(cols = starts_with("Lineage.rev_"), names_to = "infect.no", values_to = "Lineage") %>% pull(Lineage)
+D.Lin.long_genus <- D.AVM %>% dplyr::select("Rec.ID", starts_with("Lineage.Genus")) %>% pivot_longer(cols = starts_with("Lineage.Genus"), names_to = "infect.no", values_to = "Genus")  %>% pull(Genus)
+D.Lin.long_seq.CytB <- D.AVM %>% dplyr::select("Rec.ID", starts_with("Lineage.Cyt.B")) %>% pivot_longer(cols = starts_with("Lineage.Cyt.B"), names_to = "infect.no", values_to = "Seq.CytB") %>% pull(Seq.CytB)
+D.Lin.long_pt.id <- D.AVM %>% dplyr::select("pt.id", starts_with("Lineage.Cyt.B")) %>% pivot_longer(cols = starts_with("Lineage.Cyt.B"), names_to = "infect.no", values_to = "Seq.CytB") %>% pull(pt.id)
+D.Lin.long_seq.CytB.length <- unlist(lapply(strsplit(D.Lin.long_seq.CytB, ""), length))
+
+
+# Tibble of sequences
+D.Lin.pt <- tibble(pt.id = D.Lin.long_pt.id, Lineage= D.Lin.long_lin, Genus=D.Lin.long_genus,  Seq.CytB=D.Lin.long_seq.CytB, Seq.CytB.length=D.Lin.long_seq.CytB.length) %>% 
+		filter(!is.na(Lineage) & Seq.CytB.length==477)
+
+
+# Check which sequences contain valid letters (A,C,G,T only) and select only valid sequences
+seqvalid <- vector()
+for(i in 1:dim(D.Lin.pt)[1]){
+	seqstr <- strsplit(D.Lin.pt$Seq.CytB[i], "")[[1]]	
+	seqvalid[i] <- !is.element("FALSE", is.element(seqstr, c("A", "C", "G", "T")))
+}
+D.Lin.pt <- D.Lin.pt[seqvalid, ]
+
+
+# Remove pt-seq.CytB dublicates -- takes some time if computed on long strings such as sequences
+D.Lin.pt <- distinct(D.Lin.pt, pt.id, Seq.CytB, .keep_all = TRUE)
+
+
+# Add columns 
+D.Lin.pt <- D.Lin.pt %>% mutate(
+	seq.AminoA=NA, seq.AminoA.ID=NA, 
+	nsamp_all=NA, nsamp_host=NA, nsamp_infect=NA, nspec_all=NA, nspec_host=NA, nspec_infect=NA, 
+	shannon_all=NA, shannon_infect=NA, simpson_all=NA, simpson_infect=NA, raoD_all=NA, raoD_infect=NA,
+	HostRange_Chao_mean=NA, HostRange_Chao_sd=NA, 
+	LineageRichness_Chao_mean=NA, LineageRichness_Chao_sd=NA, Lineage_nobs=NA,
+      hill.phyl_all=NA, hill.phyl_infect=NA, hill.func_all=NA, hill.func_infect=NA, B.ind.phyl=NA, B.ind.phyl.sd=NA, B.ind.func=NA, B.ind.func.sd=NA,
+	B.sp.phyl=NA, B.sp.phyl.sd=NA, B.sp.func=NA, B.sp.func.sd=NA, propSamp.mainhost=NA, nsamp_host.main=NA, nsamp_infect.main=NA)
+
+# Translate nucleotide sequence in amino acid sequences
+library(Biostrings)
+SGC1 <- getGeneticCode("SGC1")  # Vertebrate Mitochondrial code
+
+for(i in 1:dim(D.Lin.pt)[1]){
+	D.Lin.pt$seq.AminoA[i] <- as.character(Biostrings::translate(DNAString(D.Lin.pt$Seq.CytB[i]), genetic.code=SGC1))
+} 
+D.Lin.pt$seq.AminoA.ID <- paste0("AA.", as.numeric(as.factor(D.Lin.pt$seq.AminoA)))
+
+# Global association matrix based on AA sequences
+D.interact.seq <- D.AVM %>% dplyr::select(Host.Latin.Name, starts_with("Lineage.Cyt.B")) %>% pivot_longer(!Host.Latin.Name, names_to = "infect_no", values_to = "Seq.CytB")
+
+D.interact.seq <- left_join(D.interact.seq, D.Lin.pt)
+D.interact.seq <- D.interact.seq[, c("Host.Latin.Name", "seq.AminoA.ID")] %>% filter(!is.na(seq.AminoA.ID))
+Assoc.Mat.seq <- table(D.interact.seq)
+
+
+# Compute summary measures
+for(i in 1:dim(D.Lin.pt)[1]){
+	seq <- D.Lin.pt$seq.AminoA.ID[i]
+	hostsp <- names(which(Assoc.Mat.seq[, seq]>0))
+	pt <- D.Lin.pt$pt.id[i]
+	lin <- unique(D.Lin.pt$Lineage[which(D.Lin.pt$seq.AminoA.ID==D.Lin.pt$seq.AminoA.ID[i])])
+
+	# Subsets from sampled birds according to status
+	sample.all <- D.AVM %>% dplyr::select(pt.id, Host.Latin.Name) %>% filter(pt.id==pt)
+	sample.host <- D.AVM %>% dplyr::select(pt.id, Host.Latin.Name) %>% filter(pt.id==pt & Host.Latin.Name %in% hostsp)
+	sample.infect <- D.AVM %>% dplyr::select(pt.id, Host.Latin.Name, starts_with("Lineage.rev_")) %>% 
+					pivot_longer(cols = starts_with("Lineage.rev_"), names_to = "infect.no", values_to = "Lineage") %>%
+			       	filter(pt.id==pt & Lineage %in% lin & Host.Latin.Name %in% hostsp)
+
+	# Bird names in local subsets
+	sampl.all_name <- sample.all$Host.Latin.Name
+	# Bird species in local assemblage as potential (known) host
+	sampl.host_name <- sample.host$Host.Latin.Name
+	# Bird species in local assemblage infected
+	sampl.infect_name <- sample.infect$Host.Latin.Name
+
+	# Local bird abundances
+	nind_all <- table(sampl.all_name)
+	# Number of infected birds
+	nind_infect <- ifelse(nind_all==0, 0,0)
+	nind_infect[names(table(sampl.infect_name))] <- table(sampl.infect_name)
+
+	# Community of all captures and infected birds
+	comm <- rbind(nind_all, nind_infect)
+	mainhost.name <- which(table(sample.host)==max(table(sample.host)))
+
+	# Local lineage species richness
+	comm_lin <- as.numeric(table(D.Lin.pt$seq.AminoA[which(D.Lin.pt$pt.id==pt)])) 
+	D.Lin.pt$LineageRichness_Chao_mean[i] <- iNEXT::ChaoRichness(comm_lin)$Estimator 
+	D.Lin.pt$LineageRichness_Chao_sd[i] <- iNEXT::ChaoRichness(comm_lin)$Est_s.e.
+	D.Lin.pt$Lineage_nobs[i] <-  length(comm_lin) 
+
+	# Summary stats
+	D.Lin.pt$HostRange_Chao_mean[i] <- iNEXT::ChaoRichness(nind_infect)$Estimator  
+	D.Lin.pt$HostRange_Chao_sd[i] <- iNEXT::ChaoRichness(nind_infect)$Est_s.e.
+
+	D.Lin.pt$nsamp_all[i] <- dim(sample.all)[1]
+	D.Lin.pt$nsamp_host[i] <- dim(sample.host)[1]
+	D.Lin.pt$nsamp_infect[i] <- dim(sample.infect)[1]
+
+	D.Lin.pt$propSamp.mainhost[i] <- nind_all[which.max(nind_infect)] / dim(sample.all)[1]
+	D.Lin.pt$nsamp_host.main[i] <- max(table(sample.host$Host.Latin.Name))
+	D.Lin.pt$nsamp_infect.main[i] <- length(which(sample.infect$Host.Latin.Name==names(which.max(table(sample.host$Host.Latin.Name)))))
+
+	D.Lin.pt$nspec_all[i] <- length(unique(sampl.all_name))
+	D.Lin.pt$nspec_host[i] <- length(unique(sampl.host_name))
+	D.Lin.pt$nspec_infect[i] <- length(unique(sampl.infect_name))
+
+	D.Lin.pt$shannon_all[i] <- vegan::diversity(nind_all, index = "shannon", MARGIN = 1, base = exp(1))
+	D.Lin.pt$shannon_infect[i] <- vegan::diversity(nind_infect, index = "shannon", MARGIN = 1, base = exp(1))
+
+	D.Lin.pt$simpson_all[i] <- vegan::diversity(nind_all, index = "simpson")
+	D.Lin.pt$simpson_infect[i] <- vegan::diversity(nind_infect, index = "simpson")
+
+	if(dim(sample.infect)[1]>5 & length(unique(sampl.all_name))>=3){
+		# Phylogentic tree of local assemblage 
+		tree.birds_local <- drop.tip.multiPhylo(BirdTree_all, BirdTree_all[[1]]$tip.label[which(is.na(match(gsub("_", " ", BirdTree_all[[1]]$tip.label), unique(sampl.all_name))))])[[1]]
+		tree.birds_local$tip.label <- gsub("_", " ", tree.birds_local$tip.label)
+
+		if(length(tree.birds_local$tip.label)==dim(comm)[2]){
+			# RaoD indices
+			D.Lin.pt$raoD_all[i] <-  picante::raoD(comm= comm, phy = tree.birds_local)$Dkk["nind_all"]
+			D.Lin.pt$raoD_infect[i] <- picante::raoD(comm= comm, phy = tree.birds_local)$Dkk["nind_infect"]
+
+			# Hills Number based on Shannon (q=1)
+			D.Lin.pt$hill.phyl_all[i] <- hillR::hill_phylo(comm, tree.birds_local, q=1)["nind_all"]
+			D.Lin.pt$hill.phyl_infect[i] <- hillR::hill_phylo(comm, tree.birds_local, q=1)["nind_infect"]
+
+			D.Lin.pt$hill.func_all[i] <- hillR::hill_func(comm, traits[colnames(comm), ], , q=1)["nind_all"]
+			D.Lin.pt$hill.func_infect[i] <- hillR::hill_func(comm, traits[colnames(comm), ], , q=1)["nind_infect"]
+
+			# Phylogenetic/functional distance measures between pairs of host and any samples birds
+			phyldist_ind.all <- outer(sampl.all_name, sampl.all_name, Vectorize(function(x,y) (phyl.dist)[x,y]))
+				phyldist_ind.all <- phyldist_ind.all[lower.tri(phyldist_ind.all)]
+			phyldist_ind.infect <- outer(sampl.infect_name, sampl.infect_name, Vectorize(function(x,y) (phyl.dist)[x,y]))
+				phyldist_ind.infect <- phyldist_ind.infect[lower.tri(phyldist_ind.infect)]
+			funcdist_ind.all <- outer(sampl.all_name, sampl.all_name, Vectorize(function(x,y) (func.dist)[x,y]))
+				funcdist_ind.all <- funcdist_ind.all[lower.tri(funcdist_ind.all)]
+			funcdist_ind.infect <- outer(sampl.infect_name, sampl.infect_name, Vectorize(function(x,y) (func.dist)[x,y]))
+				funcdist_ind.infect <- funcdist_ind.infect[lower.tri(funcdist_ind.infect)]
+
+			# Host specificity beta estimates
+			vec_ind.phyldist <- scale(c(phyldist_ind.infect, phyldist_ind.all))
+			vec_ind.funcdist <- scale(c(funcdist_ind.infect, funcdist_ind.all))
+			vec_ind.infstatus <- (c(rep(1, length(funcdist_ind.infect)), rep(0, length(funcdist_ind.all))))
+		}else{}
+
+		if(length(phyldist_ind.infect)>5 | length(funcdist_ind.infect)>5){
+			#GLM models
+			mod.glm_ind.phy <- summary(glm(vec_ind.phyldist ~vec_ind.infstatus))$coefficients
+			mod.glm_ind.fu <- summary(glm(vec_ind.funcdist ~vec_ind.infstatus))$coefficients
+
+			##D.Lin.pt$B.ind.phyl[i] <- ifelse(mod.glm_ind.phy[2,"Pr(>|t|)"]<0.05, mod.glm_ind.phy[2,"Estimate"], 0)
+			##D.Lin.pt$B.ind.phyl.sd[i] <- ifelse(mod.glm_ind.phy[2,"Pr(>|t|)"]<0.05, mod.glm_ind.phy[2,"Std. Error"], NA)
+
+			##D.Lin.pt$B.ind.func[i] <- ifelse(mod.glm_ind.fu[2,"Pr(>|t|)"]<0.05, mod.glm_ind.fu[2,"Estimate"], 0)
+			##D.Lin.pt$B.ind.func.sd[i] <- ifelse(mod.glm_ind.fu[2,"Pr(>|t|)"]<0.05, mod.glm_ind.fu[2,"Std. Error"], NA)
+
+			D.Lin.pt$B.ind.phyl[i] <- mod.glm_ind.phy[2,"Estimate"]
+			D.Lin.pt$B.ind.phyl.sd[i] <- mod.glm_ind.phy[2,"Std. Error"]
+
+			D.Lin.pt$B.ind.func[i] <- mod.glm_ind.fu[2,"Estimate"]
+			D.Lin.pt$B.ind.func.sd[i] <- mod.glm_ind.fu[2,"Std. Error"]
+
+		}else{}
+
+		# Phylogenetic/functional distance measures between pairs of host and any samples birds
+		phyldist_sp.all <- outer(unique(sampl.all_name), unique(sampl.all_name), Vectorize(function(x,y) (phyl.dist)[x,y]))
+				phyldist_sp.all <- phyldist_sp.all[lower.tri(phyldist_sp.all)]
+		phyldist_sp.infect <- outer(unique(sampl.infect_name), unique(sampl.infect_name), Vectorize(function(x,y) (phyl.dist)[x,y]))
+				phyldist_sp.infect <- phyldist_sp.infect[lower.tri(phyldist_sp.infect)]
+		funcdist_sp.all <- outer(unique(sampl.all_name), unique(sampl.all_name), Vectorize(function(x,y) (func.dist)[x,y]))
+				funcdist_sp.all <- funcdist_sp.all[lower.tri(funcdist_sp.all)]
+		funcdist_sp.infect <- outer(unique(sampl.infect_name), unique(sampl.infect_name), Vectorize(function(x,y) (func.dist)[x,y]))
+				funcdist_sp.infect <- funcdist_sp.infect[lower.tri(funcdist_sp.infect)]
+
+		vec_sp.phyldist <- scale(c(phyldist_sp.infect, phyldist_sp.all))
+		vec_sp.funcdist <- scale(c(funcdist_sp.infect, funcdist_sp.all))
+		vec_sp.infstatus <- (c(rep(1, length(funcdist_sp.infect)), rep(0, length(funcdist_sp.all))))
+
+		# Observed prevalence and CI
+		spec_prevalence.obs <- t(comm)[,"nind_infect"]/rowSums( t(comm))
+		spec_prevalence.CI.1 <- spec_prevalence.CI.2 <- NA
+		for(j in 1:dim(comm)[2]){
+			spec_prevalence.CI.1[j] <-  binom.test( t(comm)[j,"nind_infect"],sum(t(comm)[j,]), 0.5)$conf.int[1]
+			spec_prevalence.CI.2[j] <-  binom.test( t(comm)[j,"nind_infect"],sum(t(comm)[j,]), 0.5)$conf.int[2]
+		}
+		if(length(phyldist_sp.infect)>3 | length(funcdist_sp.infect)>3){
+			mod.glm_sp.phy <- summary(glm(vec_sp.phyldist ~vec_sp.infstatus))$coefficients
+			mod.glm_sp.fu <- summary(glm(vec_sp.funcdist ~vec_sp.infstatus))$coefficients
+
+			D.Lin.pt$B.sp.phyl[i] <- ifelse(mod.glm_sp.phy[2,"Pr(>|t|)"]<0.05, mod.glm_sp.phy[2,"Estimate"], 0)
+			D.Lin.pt$B.sp.phyl.sd[i] <- ifelse(mod.glm_sp.phy[2,"Pr(>|t|)"]<0.05, mod.glm_sp.phy[2,"Std. Error"], NA)
+
+			D.Lin.pt$B.sp.func[i] <- ifelse(mod.glm_sp.fu[2,"Pr(>|t|)"]<0.05, mod.glm_sp.fu[2,"Estimate"], 0)
+			D.Lin.pt$B.sp.func.sd[i] <- ifelse(mod.glm_sp.fu[2,"Pr(>|t|)"]<0.05, mod.glm_sp.fu[2,"Std. Error"], NA)
+		}else{}	
+	}else{}
+	print(i)
+}
+
+
+# Join information from other tables 
+D.lin.pt.2 <- left_join(D.Lin.pt, D.pt) 
+D.lin.pt.2 <- left_join(D.lin.pt.2, distinct(D.AVM %>%  dplyr::select("pt.id", "Bird.specrich")))
+
+# Select samples with sufficient large number of infections and samples
+D.lin_pt.sel <- D.lin.pt.2 %>% filter(nsamp_infect >=8 & nsamp_all >=10 & nspec_all >=5 & Genus!="HA") 
+# Add column of point number
+D.lin_pt.sel$pt.no <- as.numeric(as.factor(D.lin_pt.sel$pt.id))
+# Add column of lineage.site ID
+D.lin_pt.sel$lin.site <- paste0(paste0(D.lin_pt.sel$pt.no, "_", D.lin_pt.sel$Lineage))
+# Add column of AAseq.site ID
+D.lin_pt.sel$AAseq.site <- paste0(paste0(D.lin_pt.sel$seq.AminoA.ID, "_", D.lin_pt.sel$Lineage))
+
+# Only records of distinct AAseq.site
+D.lin_pt.sel <- distinct(D.lin_pt.sel, AAseq.site, .keep_all = TRUE)
+
+
+# Some summary stats
+D.lin_pt.sel %>% group_by(pt.id) %>% summarise(n.lin = length(unique(Lineage))) %>% pull(n.lin)
+D.lin_pt.sel %>% group_by(pt.id) %>% summarise(n.AAseq = length(unique(seq.AminoA.ID))) %>% pull(n.AAseq)
+length(D.lin_pt.sel %>% group_by(pt.id) %>% summarise(n.lin = n_distinct(Lineage)) %>% pull(n.lin))
+sum(D.lin_pt.sel %>% group_by(pt.id) %>% summarise(n.lin = n_distinct(Lineage)) %>% pull(n.lin))
+
+#####
+# Table of selected site-level data
+D.site.sel <- distinct(D.lin_pt.sel %>% dplyr::select(pt.id, pt.no, nsamp_all, nspec_all, Longitude, Latitude, Country, Bird.specrich, bio1, bio4, bio7, bio12, bio14 , bio15))
+D.site.sel <- arrange(D.site.sel, by = pt.no)
+
+# Plot map 
+col_region <- hcl.colors(4, "Zissou 1", alpha=1)
+plot_sample.location <- ggplot(worldmap) + geom_sf(fill = "grey90") +
+	geom_point(data = D.lin_pt.sel, aes(x = Longitude, y = Latitude, color = realm), size = 2, shape = 19) +
+      scale_color_manual(values=c("Nearctic" = col_region[1], "Palearctic" = col_region[2], "Neotropical" = col_region[3], 
+         "Afrotropical" = col_region[4], "gr1" = "grey95", "gr2" = "grey85")) +
+   theme(legend.position="bottom")
+plot_sample.location
+ 
+setwd(dir.analysis)
+# tiff("plot_sample.location_col.tiff", width = 3.307*3, height = 3.307*2, units = 'in', res = 200); plot_sample.location  ; dev.off()
+
+#  Save formatted data
+#  write.csv(D.Lin.pt, file="D.Lin.pt.csv")
+#  write.csv(D.lin_pt.sel, file="D.lin_pt.sel.csv")
+#  write.csv(D.site.sel, file="D.site.sel.csv")
