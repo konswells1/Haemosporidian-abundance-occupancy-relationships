@@ -1,0 +1,33 @@
+Variable,Description
+pt.id,Site ID
+Lineage,Name of the haemosporidian lineage (corresponding to names used in the MalAvi database)
+Genus,Genus of haemosporidian lineage
+Seq.CytB,DNA sequence of the lineage/sample based on a cytochrome B sequence
+seq.AminoA,Amino-acid sequence matched to DNA sequence using the R package Biostrings
+seq.AminoA.ID,Amino-acid sequence ID
+nsamp_all,Number of all sampled bird individuals from the local assemblage
+nsamp_host,Number of sampled bird individuals recorded to be a host
+nsamp_infect,Number of sampled bird individuals infected
+nspec_all,Number of all sampled bird species
+nspec_host,Number of sampled bird species recorded as host species (either in local assemblage or elsewhere)
+nspec_infect,Number of sampled bird species infected
+HostRange_Chao_mean,Mean of the host range estimate based on Chao1 species richness estimator
+HostRange_Chao_sd,One SD of the host range estimate based on Chao1 species richness estimator
+Lineage_nobs,Number of haemosporidian lineages observed
+B.ind.phyl,Mean of the  estimate of phylogenetic host specificity (B.phyl)
+B.ind.phyl.sd,One SD  of the  estimate of phylogenetic host specificity (B.phyl)
+B.ind.func,Mean of the  estimate of functional host specificity (B.func)
+B.ind.func.sd,One SD  of the  estimate of functional host specificity (B.func)
+nsamp_host.main,Number of all sampled bird individuals from the main host species (main host species (i.e. the single host species for which the largest number of infected birds were recorded within a local assemblage))
+nsamp_infect.main,Number of all sampled bird individuals from the main host species infected 
+Longitude,Longitude value of the geographic coordinate fo the study site (WGS84) 
+Latitude,Latitude value of the geographic coordinate fo the study site (WGS84) 
+Country,Country where the study site is located
+realm,Zoogeographical region based on Holt et al. 2013 (doi: 10.1126/science.1228282)
+bio1,"""bio1"" annual mean temperature, based on WorldCilm database version 2 (http://world clim.org/version2)"
+bio4,"""bio4"" temperature seasonality, based on WorldCilm database version 2 (http://world clim.org/version2)"
+bio7,"""bio7""  temperature annual range, based on WorldCilm database version 2 (http://world clim.org/version2)"
+bio12,"""bio12""  annual precipitation, based on WorldCilm database version 2 (http://world clim.org/version2)"
+bio14,"""bio14""  precipitation of driest month, based on WorldCilm database version 2 (http://world clim.org/version2)"
+bio15,"""bio15""  precipitation seasonality based on coefficient of variation, based on WorldCilm database version 2 (http://world clim.org/version2)"
+Bird.specrich,local bird species richness of terrestrial birds based on a map that summarizes species distributions from BirdLife International range maps (https://biodiversitymapping.org/)
